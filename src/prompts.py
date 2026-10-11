@@ -74,6 +74,8 @@ def get_remember_prompt(cleaned_input, retrieved_facts):
         f"Answer:"
     )
 
+# Add this function to prompts.py
+
 
 def get_conflict_resolution_prompt(existing_fact, new_fact):
     return (
