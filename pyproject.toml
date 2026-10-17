@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "localized-agentic-memory-framework"
+version = "2.0.0"
+description = "Edge-deployed agentic memory system with scheduled consolidation and semantic deduplication."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "streamlit>=1.35.0",
+    "chromadb>=0.5.0",
+    "ollama>=0.3.0",
+    "duckduckgo-search>=6.0.0",
+    "trafilatura>=1.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "matplotlib>=3.8.0",
+    "ruff>=0.4.0",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "src"]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra -q"
+markers = [
+    "integration: marks tests as requiring live local Ollama service",
+]

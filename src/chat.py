@@ -1,124 +1,138 @@
-import ollama
-import sqlite3
+"""
+Command-Line Interface (CLI) for Localized Agentic Memory Framework.
+
+Provides an interactive terminal session with full mode support (:search:, :deepsearch:,
+:remember:, :incognito:), verifiable context history, and session consolidation.
+"""
+
+from __future__ import annotations
+
+import sys
 import uuid
-import time
-from datetime import datetime
-import consolidate
-import router as rtr
-import dedup
+from pathlib import Path
 
-DB_PATH = "data/memory.db"
-# MODEL_FAST = "qwen2.5:1.5b"
-MODEL_EXTRACTION = "llama3.2:3b"
-session_id = str(uuid.uuid4())
-
-
-def get_user_input():
-    user_input = input("You: ").strip()
-    return user_input
-
-
-def get_connection():
-    conn = sqlite3.connect(DB_PATH)
-    return conn
+try:
+    from . import config, db, memory_service, models, router
+    from .vector_store import VectorStore
+except ImportError:
+    # Handle direct script invocation
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import config
+    import db
+    import memory_service
+    import models
+    import router
+    from vector_store import VectorStore
 
 
-conn = get_connection()
+def main() -> None:
+    print("=" * 60)
+    print(f" {config.APP_NAME} v{config.APP_VERSION} (CLI Mode)")
+    print("=" * 60)
+    print(f"Runtime Data Directory: {config.get_runtime_data_dir()}")
 
+    # 1. Initialize SQLite schema and migrations
+    db.init_db()
 
-def user_feedback():
-    feedback = input(
-        "Save this interaction to memory? yes/1 [default], no/0: ").lower().strip()
-    flag = 0 if feedback in ["0", "no", "n"] else 1
-    return flag
+    # 2. Check Ollama server & models
+    ollama_status = models.check_ollama_status()
+    if not ollama_status["running"]:
+        print("\n[!] WARNING: Local Ollama server is not running.")
+        print("    Chat, extraction, and conflict resolution will fail.")
+        print("    To start Ollama, open the Ollama app or run 'ollama serve' in a terminal.\n")
+    else:
+        installed = ollama_status.get("models", [])
+        print(f"[*] Ollama running. Detected models: {', '.join(installed) if installed else 'None'}")
+        if not models.is_model_available(config.MODEL_CHAT):
+            print(f"[!] Chat model '{config.MODEL_CHAT}' not found. Run: ollama pull {config.MODEL_CHAT}")
 
-# The save_turn() function is a database logger
+    session_id = str(uuid.uuid4())
+    print(f"\nSession initialized: {session_id}")
+    print("Prefixes available: :search:, :deepsearch:, :remember:, :incognito:")
+    print("Type 'exit' to consolidate session and save memory.\n")
 
+    conn = db.get_db_connection()
+    vstore = VectorStore()
+    mclient = models.LocalOllamaClient()
 
-def save_turn(conn, session_id, role, content):
-    start = time.perf_counter()
-    conn.execute(
-        "INSERT INTO conversations (session_id, role, content) VALUES (?, ?, ?)",
-        (session_id, role, content)
-    )
-    conn.commit()
+    try:
+        while True:
+            try:
+                user_input = input("You: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\nSession interrupted.")
+                break
 
-    elapsed_ms = (time.perf_counter() - start) * 1000
-    return elapsed_ms
+            if not user_input:
+                continue
 
-# handle_chat() is the default handler for normal chat mode
+            if user_input.lower() == "exit":
+                print("\nFinalizing session and consolidating memories...")
+                try:
+                    result = memory_service.consolidate_session(
+                        conn=conn,
+                        session_id=session_id,
+                        client=mclient,
+                        vector_store=vstore,
+                    )
+                    print(f"Consolidation complete: {result['facts_extracted']} extracted, "
+                          f"{result['facts_added']} added, {result['duplicates']} duplicates, "
+                          f"{result['updates']} updates.")
+                except Exception as e:
+                    print(f"[!] Consolidation encountered an error: {e}")
+                break
 
+            mode, cleaned_input = router.route_message(user_input)
 
-def handle_chat(cleaned_input):
+            try:
+                if mode == "incognito":
+                    res = router.handle_incognito(cleaned_input, client=mclient)
+                    print(f"\n[Incognito Assistant]: {res['reply']}\n")
+                    print(f"  [stateless local execution | model inference: {res['infer_ms']:.1f}ms]\n")
 
-    history = rtr.load_history(conn, session_id)
-    # print("--- DEBUG: sending this history ---")
-    # print(history)
+                elif mode == "search":
+                    res = router.handle_search(cleaned_input, client=mclient)
+                    print(f"\nAssistant: {res['reply']}\n")
+                    if res.get("sources"):
+                        print("  Sources:")
+                        for s in res["sources"]:
+                            print(f"  - {s['title']}: {s['url']}")
+                    print(f"  [search: {res['search_ms']:.1f}ms | inference: {res['infer_ms']:.1f}ms]\n")
 
-    response = ollama.chat(model=MODEL_EXTRACTION, messages=history)
-    # print("--- DEBUG: raw response ---")
-    # print(response)
+                elif mode == "deepsearch":
+                    res = router.handle_deepsearch(cleaned_input, client=mclient)
+                    print(f"\nAssistant: {res['reply']}\n")
+                    if res.get("sources"):
+                        print("  Sources:")
+                        for s in res["sources"]:
+                            print(f"  - {s['title']}: {s['url']}")
+                    print(f"  [scrape: {res['search_ms']:.1f}ms | inference: {res['infer_ms']:.1f}ms]\n")
 
-    reply = response["message"]["content"]
-    return reply
+                elif mode == "remember":
+                    res = router.handle_remember(conn, cleaned_input, vector_store=vstore, client=mclient)
+                    print(f"\nAssistant: {res['reply']}\n")
+                    if res.get("recalled_facts"):
+                        print("  Recalled Memories Used:")
+                        for rf in res["recalled_facts"]:
+                            sim = rf.get("similarity", 0.0)
+                            print(f"  * (similarity: {sim:.2f}) {rf['fact_text']}")
+                    print(f"  [inference: {res['infer_ms']:.1f}ms]\n")
 
+                else:  # normal chat
+                    res = router.handle_chat(conn, session_id, cleaned_input, client=mclient)
+                    print(f"\nAssistant: {res['reply']}\n")
+                    print(f"  [buffer write: {res['write_ms']:.2f}ms | inference: {res['infer_ms']:.1f}ms]\n")
 
-# main() is the entry point for the chat application
+            except models.OllamaConnectionError as e:
+                print(f"\n[!] Ollama Error: {e}\n")
+            except models.ModelNotFoundError as e:
+                print(f"\n[!] Model Error: {e}\n")
+            except Exception as e:
+                print(f"\n[!] Processing Error: {e}\n")
 
-def main():
-
-    print(f'Session started: {session_id}')
-    print('Type "exit" to end the session.\n')
-
-    # handlers is a dict that calls respective handler func
-    # based on mode returned by route_message()
-
-    handlers = {"search": rtr.handle_search, "deepsearch": rtr.handle_deepsearch,
-                "remember": rtr.handle_remember, "incognito": rtr.handle_incognito, "chat": handle_chat}
-
-    print("Warming up model...")
-    ollama.chat(model=MODEL_EXTRACTION, messages=[
-                {"role": "user", "content": "hi"}])
-    print("Ready.\n")
-
-    while True:
-        user_input = get_user_input()
-        if user_input.lower() == "exit":
-            consolidate.trigger_consolidation(conn, session_id)
-            dedup.trigger_deduplication(conn)
-            break
-
-        infer_start = time.perf_counter()
-        mode, cleaned_input = rtr.route_message(user_input)
-
-        handler_func = handlers.get(mode, handle_chat)
-        try:
-            reply = handler_func(cleaned_input)
-        except Exception as e:
-            print(f"Error occurred while handling {mode}: {e}")
-            reply = "Sorry, I encountered an error while processing your request."
-
-        infer_ms = (time.perf_counter() - infer_start) * 1000
-
-        # 1. Display assistant response first
-        print(f"Assistant: {reply}")
-
-        # 2. Ask user for feedback immediately after response
-        flag = user_feedback() if mode != "incognito" else 0
-
-        # 3. Save BOTH user and assistant turns if feedback is positive
-        if mode != "incognito" and reply.strip() != '' and flag != 0:
-            user_write_ms = save_turn(conn, session_id, "user", user_input)
-            assistant_write_ms = save_turn(
-                conn, session_id, "assistant", reply)
-            write_ms = user_write_ms + assistant_write_ms
-        else:
-            write_ms = 0
-
-        print(
-            f"  [buffer write: {write_ms:.2f}ms | model inference: {infer_ms:.1f}ms]\n")
-
-    conn.close()
+    finally:
+        conn.close()
+        print("Session ended.")
 
 
 if __name__ == "__main__":

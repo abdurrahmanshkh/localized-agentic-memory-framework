@@ -1,4 +1,4 @@
-# Python
+# Python artifacts
 __pycache__/
 *.py[cod]
 *$py.class
@@ -34,12 +34,31 @@ venv.bak/
 data/*.db
 data/*.sqlite
 data/*.sqlite3
+data/*-wal
+data/*-shm
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.debug-backup
 chroma/
 !data/schema.sql
+
+# Local backups & exports
+backups/
+exports/
+demo_data/
 
 # Logs
 logs/
 *.log
+
+# Pytest & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
 
 # Streamlit
 .streamlit/secrets.toml
